@@ -1,0 +1,185 @@
+name: Build release
+
+# Two ways to run this:
+#  1. Publish a release in the GitHub web UI (Releases > Draft a new release >
+#     pick or create a tag > Publish). The builds are attached to that release.
+#  2. Actions tab > "Build release" > Run workflow. Builds are uploaded as
+#     workflow artifacts. Fill in "tag" to also create a release with that tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional: create a release with this tag (for example v1.0.0). Leave empty for artifacts only."
+        required: false
+        default: ""
+      bundle_models:
+        description: "Bundle AI models into the builds (adds about 200 MB per platform)"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Models packed into the builds. Keys from splitscope/models.py.
+  # Remove a key to leave it out; users can still download it inside the app.
+  BUNDLE_MODELS: "Kim_Vocal_2 UVR_MDXNET_KARA_2 kuielab_a_drums kuielab_a_bass kuielab_a_other"
+  PORTAUDIO_VERSION: "19.7.0"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x64
+          # 22.04 keeps the glibc requirement at 2.35. If GitHub retires this
+          # image, switch to ubuntu-24.04 (raises the minimum to glibc 2.39).
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: macos-14
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Work out version and model settings
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VER="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            VER="${{ github.event.inputs.tag }}"
+          else
+            VER="dev-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.bundle_models }}" = "false" ]; then
+            echo "models=" >> "$GITHUB_OUTPUT"
+          else
+            echo "models=$BUNDLE_MODELS" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Linux system packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev \
+            libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-xinerama0 libxcb-xfixes0 libxcb-shape0 \
+            libxcb-xkb1 libegl1 libdbus-1-3 libfontconfig1
+
+      - name: Build PortAudio (Linux, ALSA only)
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL "https://github.com/PortAudio/portaudio/archive/refs/tags/v${PORTAUDIO_VERSION}.tar.gz" | tar xz
+          cd "portaudio-${PORTAUDIO_VERSION}"
+          ./configure --without-jack --without-oss --prefix="$RUNNER_TEMP/portaudio"
+          make -j"$(nproc)"
+          make install
+          ldd "$RUNNER_TEMP/portaudio/lib/libportaudio.so.2" | grep -q libasound || { echo "PortAudio built without ALSA"; exit 1; }
+          echo "PORTAUDIO_LIB=$RUNNER_TEMP/portaudio/lib/libportaudio.so.2" >> "$GITHUB_ENV"
+
+      - name: Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "pyinstaller>=6.10,<7"
+
+      - name: Download models to bundle
+        if: steps.meta.outputs.models != ''
+        run: |
+          python tools/fetch_models.py build_models ${{ steps.meta.outputs.models }}
+          echo "SPLITSCOPE_MODELS_DIR=$GITHUB_WORKSPACE/build_models" >> "$GITHUB_ENV"
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm packaging/splitscope.spec
+
+      - name: Self-test the frozen build
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          case "${{ runner.os }}" in
+            Windows) EXE="dist/SplitScope/SplitScope.exe" ;;
+            macOS)   EXE="dist/SplitScope.app/Contents/MacOS/SplitScope" ;;
+            *)       EXE="dist/SplitScope/SplitScope" ;;
+          esac
+          set +e
+          "$EXE" --selftest selftest.txt
+          CODE=$?
+          set -e
+          cat selftest.txt || echo "no self-test report was written"
+          exit $CODE
+
+      - name: Package
+        id: pkg
+        run: |
+          NAME="SplitScope-${{ steps.meta.outputs.version }}-${{ matrix.platform }}"
+          mkdir -p out
+          case "${{ runner.os }}" in
+            Windows)
+              cp README.md LICENSE dist/SplitScope/
+              mkdir -p dist/SplitScope/models
+              echo "Put extra .onnx models here for portable use." > dist/SplitScope/models/README.txt
+              (cd dist && 7z a -tzip -mx=7 "../out/$NAME.zip" SplitScope >/dev/null)
+              echo "file=out/$NAME.zip" >> "$GITHUB_OUTPUT"
+              ;;
+            macOS)
+              ditto -c -k --sequesterRsrc --keepParent dist/SplitScope.app "out/$NAME.zip"
+              echo "file=out/$NAME.zip" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              cp README.md LICENSE assets/icon.png packaging/linux/install-desktop-entry.sh dist/SplitScope/
+              mkdir -p dist/SplitScope/models
+              echo "Put extra .onnx models here for portable use." > dist/SplitScope/models/README.txt
+              tar -C dist -czf "out/$NAME.tar.gz" SplitScope
+              echo "file=out/$NAME.tar.gz" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SplitScope-${{ matrix.platform }}
+          path: ${{ steps.pkg.outputs.file }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: build
+    if: github.event_name == 'release' || github.event.inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Attach to the published release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: artifacts/*
+
+      - name: Create release from manual run
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: SplitScope ${{ github.event.inputs.tag }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          files: artifacts/*
