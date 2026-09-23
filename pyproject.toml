@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "splitscope"
+dynamic = ["version"]
+description = "Offline audio separation workstation: AI stem separation, center/side isolation, EQ and multiband with a real-time analyser"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6,<7",
+    "numpy>=1.24,<3",
+    "scipy>=1.10",
+    "soundfile>=0.12.1",
+    "sounddevice>=0.4.6",
+    "onnxruntime>=1.17",
+    "imageio-ffmpeg>=0.4.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/NullAngst/SplitScope"
+
+[project.gui-scripts]
+splitscope = "splitscope.app:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "splitscope.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["splitscope*"]
+
+[tool.setuptools.package-data]
+splitscope = ["resources/*"]
