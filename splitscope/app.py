@@ -91,7 +91,22 @@ def selftest(out_path: str | None) -> int:
         w.close()
         return "main window created"
 
+    def dsp():
+        from .dsp import dsp_separate as D
+
+        sr = 44100
+        x = (np.random.default_rng(0).standard_normal((sr * 4, 2)) * 0.1).astype(np.float32)
+        s = D.DSPSettings()
+        voc, inst = D.vocals_estimate(x, sr, s)
+        su, vo, hi = D.multistage(x, sr, s)
+        for parts in ((voc, inst), (su, vo, hi)):
+            err = float(np.abs(sum(parts) - x).max())
+            if err > 1e-4 or not all(p.shape == x.shape for p in parts):
+                raise RuntimeError(f"stems do not sum to the input (max error {err})")
+        return "vocal estimate and two-pass HPSS sum to input"
+
     check("numpy/scipy", lambda: __import__("scipy.signal").__version__ and np.__version__)
+    check("Model-free separation (REPET-SIM, HPSS)", dsp)
     check("libsndfile (FLAC/MP3/OGG write+read)", sndfile)
     check("PortAudio", portaudio)
     check("ONNX Runtime", onnx)
@@ -106,7 +121,56 @@ def selftest(out_path: str | None) -> int:
     return 0 if ok else 1
 
 
+def _desktop_escape(path: str) -> str:
+    """Quote a path for a .desktop Exec line (freedesktop spec)."""
+    for ch in ("\\", '"', "`", "$"):
+        path = path.replace(ch, "\\" + ch)
+    # The string-value escape rule then doubles every backslash again.
+    return f'"{path}"'.replace("\\", "\\\\")
+
+
+def desktop_entry(install: bool) -> int:
+    """Adds SplitScope to (or removes it from) the current user's application
+    menu. Points at the AppImage when run from one, else at this executable."""
+    data = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    apps = os.path.join(data, "applications")
+    icons = os.path.join(data, "icons", "hicolor", "256x256", "apps")
+    entry = os.path.join(apps, "splitscope.desktop")
+    icon = os.path.join(icons, "splitscope.png")
+    if not install:
+        for f in (entry, icon):
+            if os.path.exists(f):
+                os.remove(f)
+        print(f"Removed {entry}")
+        return 0
+    target = os.environ.get("APPIMAGE") or (sys.executable if getattr(sys, "frozen", False) else None)
+    if not target:
+        print("Run this from the AppImage or a release build.", file=sys.stderr)
+        return 1
+    os.makedirs(apps, exist_ok=True)
+    os.makedirs(icons, exist_ok=True)
+    src_icon = _icon_path()
+    if src_icon:
+        import shutil
+
+        shutil.copyfile(src_icon, icon)
+    mime = ("audio/mpeg;audio/flac;audio/x-flac;audio/x-wav;audio/wav;audio/ogg;audio/x-vorbis+ogg;"
+            "audio/opus;audio/mp4;audio/aac;audio/x-aiff;")
+    with open(entry, "w", encoding="utf-8") as fh:
+        fh.write("[Desktop Entry]\nType=Application\nName=SplitScope\n"
+                 "Comment=Audio separation workstation\n"
+                 f"Exec={_desktop_escape(os.path.abspath(target))} %f\nIcon=splitscope\nTerminal=false\n"
+                 f"Categories=AudioVideo;Audio;\nMimeType={mime}\nStartupWMClass=SplitScope\n")
+    print(f"Installed {entry}")
+    print("Run this again if you move or rename the file.")
+    return 0
+
+
 def main() -> int:
+    if "--install-desktop-entry" in sys.argv:
+        return desktop_entry(True)
+    if "--remove-desktop-entry" in sys.argv:
+        return desktop_entry(False)
     if "--selftest" in sys.argv:
         i = sys.argv.index("--selftest")
         out = sys.argv[i + 1] if len(sys.argv) > i + 1 else None

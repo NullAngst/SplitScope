@@ -2,7 +2,9 @@
 
 # SplitScope
 
-An offline audio separation workstation. Open a song, pull out the vocals (or drums, bass, guitars and keys, lead or backing vocals, center or side channels) with one click, hear the result through a real-time EQ and multiband chain, and export any stem or the processed mix.
+An offline audio separation workstation for anyone who wants stems out of a finished mix. Open a song, pull out the vocals (or drums, bass, guitars and keys, lead or backing vocals, center or side channels) with one click, hear the result through a real-time EQ and multiband chain, and export any stem or the processed mix.
+
+Every button works with or without AI. With the MDX-Net models installed you get model quality; with "DSP only" ticked (or no models on disk) each button runs a model-free method built from repetition, stereo position, sustain and frequency, which you can tune.
 
 Runs on Windows, Linux and macOS (Apple Silicon). Nothing is sent anywhere: once the models are on disk, the program never touches the network.
 
@@ -10,20 +12,50 @@ Runs on Windows, Linux and macOS (Apple Silicon). Nothing is sent anywhere: once
 
 **One-click isolation.** Buttons on the left create new stems and solo the result:
 
-| Button | Method | Notes |
+| Button | With a model | Without (DSP) |
 |---|---|---|
-| Isolate vocals / Remove vocals | AI (Kim Vocal 2 by default) | Produces Vocals and Instrumental stems |
-| Lead vocal / Backing vocals | AI vocals, then the UVR Karaoke model | Without the karaoke model it splits the vocal stem by stereo position |
-| Isolate drums | AI (KUIELab drums) | |
-| Isolate bass | AI (KUIELab bass) | |
-| Guitars / keys | AI (KUIELab "other") | This model returns everything that is not vocals, drums or bass. There is no guitar-only model, so keys and synths come along |
-| Center channel / Side channels | Spectral pan analysis | No model needed. Backing vocals and double-tracked guitars are usually on the sides |
-| Mid / side split | Plain L+R / L-R matrix | |
-| Harmonic / perc. | Median-filter HPSS | Sustained sound vs transients |
+| Isolate vocals / Remove vocals | Kim Vocal 2 by default | Vocal estimate: non-repeating x center-panned x vocal band x not-a-transient |
+| Lead vocal / Backing vocals | Vocals, then UVR Karaoke 2 | Vocals, then split by stereo position (center = lead) |
+| Isolate drums | KUIELab drums | Percussive part with a margin, so only clear hits count |
+| Isolate bass | KUIELab bass | Sustained, mostly-center content under 200 Hz from a long-window split |
+| Guitars / keys | KUIELab "other" (keys and synths come along, there is no guitar-only model) | Sustained part of the instrumental above the bass range |
+| Center channel / Side channels | | Spectral pan analysis. Backing vocals and double-tracked guitars are usually on the sides |
+| Repeating / lead | | REPET-SIM: what repeats through the song vs what does not |
+| Sustain / voice / hits | | Two-pass HPSS: steady instruments, voice and leads, drums |
+| Mid / side split | | Plain L+R / L-R matrix |
+| Harmonic / perc. | | Median-filter HPSS, optional third Residual stem |
 
 Any stem can be separated further: use a stem's `...` menu, "Separate this stem further", then press another button. For example: Isolate vocals, then Backing vocals on the Vocals stem.
 
-If a model is missing, its button gets a dashed border and falls back to a DSP estimate. The fallbacks are much weaker than the models (they are filters, not separation) and the status bar says so when one is used.
+A button with a dashed border runs its DSP method, either because its model is missing or because "DSP only (no AI)" is ticked. The status bar says which method ran. DSP stems are named with "(DSP)" so they never get mixed up with model output. Every split sums back to its source exactly: unmute all the stems of one run and you hear the original.
+
+## Separating without AI
+
+I use DSP-only mode when I want to know exactly what happened to the signal, or on material the models were never trained on (live tapes, old mono-ish stereo, spoken word over music). Tick "DSP only (no AI)" under the isolate buttons and every button switches to its model-free method. Untick it and the models come back; both results stay cached, so you can A/B them.
+
+What the methods actually look at:
+
+- **Repetition (REPET-SIM, Rafii and Pardo 2012).** For each moment of the song it finds the 40 moments that look most like it (at least a second away) and takes their median. A chorus chord, a drum loop or a riff survives the median and becomes "Repeating". A lead vocal line or a solo usually does not repeat note for note and becomes "Lead (non-repeating)". This is the strongest cue for vocals in pop and rock.
+- **Sustain vs hits (HPSS, FitzGerald 2010).** A median along time keeps steady partials, a median along frequency keeps broadband hits. With a split margin above 1 a third "Residual" stem catches whatever is neither (noise, breath, reverb tails).
+- **Two window sizes (FitzGerald and Gainza 2010).** Through a 370 ms window a voice with vibrato looks smeared and lands with the drums; through a 23 ms window it looks steady and separates from them. "Sustain / voice / hits" runs both passes.
+- **Stereo position.** The same pan and phase test the live Spatial panel uses.
+
+The DSP vocal estimate multiplies the first, second and fourth cues with a vocal band (100 Hz to 12 kHz by default). Each cue is a soft 0 to 1 weight per frequency bin, and the instrumental is the exact remainder.
+
+Tune all of it in Separate > DSP separation settings (or the "DSP settings" button). Every value has a tooltip. The ones worth trying first:
+
+- Vocals bleeding the backing: raise "Background bias" to 1.5 or 2.
+- Vocals too quiet or thin: lower "Background bias", lower "Center weighting" for wide or double-tracked vocals.
+- Snare hits in the vocal: raise "Transient suppression". Too high dulls consonants.
+- Songs with few repeats (through-composed, short clips): lower "Similar frames" to 15 or 20.
+
+Changing a setting and pressing the button again replaces that stem with the new result. If a setting makes things worse, "Restore Defaults" in the dialog puts it back.
+
+Stacking works well without AI. Some chains I use:
+
+- Center channel, then Repeating / lead on the Center stem: a centered lead vocal without the centered loop under it.
+- Remove vocals (DSP), then Harmonic / perc. on the instrumental: a cleaner drum or chord bed.
+- Sustain / voice / hits, then the Focus panel on "Voice / leads" with the guitar solo preset, then Render processing chain to new stem.
 
 **Real-time processing chain** (everything you hear, and exactly what "What you hear" exports):
 
@@ -47,7 +79,16 @@ Get the archive for your system from the [Releases](../../releases) page.
 
 **Windows:** unzip anywhere and run `SplitScope\SplitScope.exe`. The build is not code-signed, so SmartScreen may warn on first launch: "More info", then "Run anyway".
 
-**Linux (x86-64):** extract the `.tar.gz` and run `SplitScope/SplitScope`. Optional: run `./install-desktop-entry.sh` inside the folder to add it to your application menu. Audio goes through your system's ALSA library, which on PipeWire or PulseAudio desktops routes to them as usual. Built on Ubuntu 22.04, so it needs glibc 2.35 or newer (openSUSE Tumbleweed and Leap 15.6 are fine).
+**Linux (x86-64):** download `SplitScope-<version>-x86_64.AppImage`, make it executable and run it:
+
+```
+chmod +x SplitScope-*-x86_64.AppImage
+./SplitScope-*-x86_64.AppImage
+```
+
+Optional: `./SplitScope-*-x86_64.AppImage --install-desktop-entry` adds it to your application menu (run it again if you move the file, `--remove-desktop-entry` takes it out). Gear Lever or AppImageLauncher work too, and since the AppImage carries update information, they and AppImageUpdate can update it in place from the newest release.
+
+The AppImage uses the static AppImage runtime, so it does not need `libfuse2`. Audio goes through your system's ALSA library, which on PipeWire or PulseAudio desktops routes to them as usual. Built on Ubuntu 22.04, so it needs glibc 2.35 or newer (Ubuntu 22.04+, Kubuntu, Debian 12, Fedora 36+, openSUSE Tumbleweed and Leap 15.6 are all fine). For portable models, put a `models` folder next to the `.AppImage` file.
 
 **macOS (Apple Silicon):** unzip and move `SplitScope.app` to Applications. The app is not signed or notarized, so macOS will refuse to open it until you clear the download flag once:
 
@@ -73,7 +114,7 @@ More can be downloaded from inside the app (Models button): UVR MDX-Net Voc FT a
 
 The app looks for models in this order:
 
-1. a `models` folder next to the executable (portable use)
+1. a `models` folder next to the executable, or next to the `.AppImage` file on Linux (portable use)
 2. the models bundled into the build
 3. your user data folder (where in-app downloads go):
    - Windows: `%APPDATA%\SplitScope\models`
@@ -88,6 +129,9 @@ Separation runs on the CPU. In development, on a single CPU core, Kim Vocal 2 ne
 
 ## Honest limits
 
+- The DSP methods have no idea what a voice or a guitar is. They know what repeats, what sustains and where it sits in the stereo field. A sung phrase that repeats exactly (a chorus hook, a doubled ad-lib) partly goes to "Repeating". A guitar riff that never repeats lands with the vocal. Expect clearly more bleed than the models give.
+- The DSP methods hold the whole song's magnitude spectrogram in memory. On a 5-minute stereo song, the DSP vocal estimate took about 55 seconds and peaked around 1.2 GB on a 2-core test machine; "Sustain / voice / hits" took about 40 seconds. More cores help the similarity search.
+- The default DSP settings were chosen on synthetic test mixes, not on a listening panel. Treat them as a starting point and tune per song.
 - Frequency focus is a filter. "Guitar solo focus" keeps 500 Hz to 4.5 kHz, which also keeps the vocal, snare and keys in that range. Use it together with an AI stem or center/side extraction.
 - There is no guitar-only model. "Guitars / keys" returns the KUIELab "other" stem.
 - Center/side separation depends on the mix. Anything panned center (lead vocal, kick, snare, bass) lands in Center, anything wide lands in Sides. Mono recordings have nothing to separate, and the app tells you when a file is mono.
@@ -143,14 +187,14 @@ On Linux, `sounddevice` needs PortAudio from your package manager (openSUSE: `su
 
 ## Building releases with GitHub Actions
 
-The workflow in `.github/workflows/release.yml` builds all three platforms, runs the self-test on each frozen build (including a real model inference), and packages the result. Everything can be done from the GitHub website:
+The workflow in `.github/workflows/release.yml` builds all three platforms, runs the self-test on each frozen build (a real model inference and a DSP separation run), and packages the result: a zip for Windows and macOS, an AppImage plus its `.zsync` update file for Linux. The Linux AppImage is self-tested a second time as the finished image. Everything can be done from the GitHub website:
 
-- **Publish a release:** Releases > Draft a new release > choose or create a tag such as `v1.0.0` > Publish. The workflow starts and attaches the three archives to that release after 15 to 30 minutes.
+- **Publish a release:** Releases > Draft a new release > choose or create a tag such as `v1.1.0` > Publish. The workflow starts and attaches the builds to that release after 15 to 30 minutes.
 - **Test build without a release:** Actions > Build release > Run workflow. Download the archives from the run's Artifacts section. Enter a tag in the form to also create a release.
 
-To change which models are bundled, edit `BUNDLE_MODELS` at the top of the workflow (keys from `splitscope/models.py`), or untick "Bundle AI models" when running it manually. The Linux job compiles PortAudio with ALSA support only and ships it with the build; `libasound` itself is left out on purpose so the user's system ALSA (and its PipeWire/Pulse plugins) is used.
+To change which models are bundled, edit `BUNDLE_MODELS` at the top of the workflow (keys from `splitscope/models.py`), or untick "Bundle AI models" when running it manually. The Linux job compiles the latest PortAudio release with ALSA support only and ships it with the build; `libasound` itself is left out on purpose so the user's system ALSA (and its PipeWire/Pulse plugins) is used. The AppImage is packed with the rolling `continuous` build of appimagetool, and the PortAudio and PyInstaller versions float too, so nothing in the workflow needs a manual version bump.
 
-To build locally: `pip install pyinstaller`, then `pyinstaller --noconfirm packaging/splitscope.spec`. See the comments at the top of the spec for the environment variables it reads.
+To build locally: `pip install pyinstaller`, then `pyinstaller --noconfirm packaging/splitscope.spec`. See the comments at the top of the spec for the environment variables it reads. To turn that into an AppImage, copy the steps from the "Build AppImage (Linux)" step of the workflow: they only need `appimagetool` and the files in `packaging/linux/`.
 
 ## Project layout
 
@@ -166,14 +210,19 @@ splitscope/
   dsp/chain.py                 chain settings and compiled real-time parameters
   dsp/processor.py             STFT processing chain (real-time and offline)
   dsp/curves.py                EQ, focus, crossover and multiband curves
-  dsp/dsp_separate.py          HPSS, mid/side, center/sides
+  dsp/dsp_separate.py          model-free separation: REPET-SIM, HPSS, two-pass HPSS,
+                               DSP vocal/drum/bass estimates, mid/side, center/sides
   ui/                          widgets and windows
 packaging/splitscope.spec      PyInstaller build
+packaging/linux/               AppRun and .desktop file for the AppImage
 tools/make_icon.py             regenerates assets/icon.*
 tools/fetch_models.py          downloads models for bundling
 ```
 
 ## Credits and license
+
+Model-free methods follow: Z. Rafii and B. Pardo, "Music/Voice Separation using the Similarity Matrix" (ISMIR 2012); D. FitzGerald, "Harmonic/Percussive Separation using Median Filtering" (DAFx 2010); D. FitzGerald and M. Gainza, "Single Channel Vocal Separation using Median Filtering and Factorisation Techniques" (ISAST 2010); J. Driedger, M. Müller and S. Disch, "Extending Harmonic-Percussive Separation of Audio Signals" (ISMIR 2014). The code is a NumPy/SciPy implementation written for this project.
+
 
 SplitScope is licensed under the GNU General Public License v3.0 or later (see `LICENSE`).
 

@@ -314,3 +314,103 @@ class ModelDialog(QDialog):
             self.job.cancel()
             self.job.wait(3000)
         super().reject()
+
+
+# ------------------------------------------------------------------ DSP settings
+class DSPSettingsDialog(QDialog):
+    """Parameters for the model-free separation methods."""
+
+    # field, label, min, max, step, decimals (0 = integer), tooltip
+    GROUPS = [
+        ("Repetition (REPET-SIM): used by Repeating / lead and the DSP vocal estimate", [
+            ("rep_neighbours", "Similar frames", 3, 200, 5, 0,
+             "How many look-alike frames are compared. More gives a steadier background estimate\n"
+             "and a cleaner lead, but needs the song to repeat that often."),
+            ("rep_min_gap_s", "Minimum gap (s)", 0.0, 10.0, 0.25, 2,
+             "Look-alike frames must be at least this far away in time, so a long held note\n"
+             "does not count as repeating itself."),
+            ("rep_strength", "Background bias", 0.25, 6.0, 0.25, 2,
+             "Above 1 sends doubtful energy to the background: cleaner lead, quieter lead.\n"
+             "Below 1 does the opposite."),
+        ]),
+        ("DSP vocal estimate: Isolate vocals / Remove vocals without a model", [
+            ("voc_center", "Center weighting", 0.0, 1.0, 0.05, 2,
+             "0 ignores stereo position. 1 keeps only center-panned content.\n"
+             "Lower it for stereo-wide or double-tracked vocals."),
+            ("voc_width", "Center width", 0.05, 1.0, 0.05, 2,
+             "How far from dead center still counts as center (pan units, 1 = hard left/right)."),
+            ("voc_lo", "Vocal band low (Hz)", 20.0, 1000.0, 10.0, 0,
+             "Content below this goes to the instrumental."),
+            ("voc_hi", "Vocal band high (Hz)", 2000.0, 22000.0, 500.0, 0,
+             "Content above this goes to the instrumental. Raise it to keep sibilance and air."),
+            ("voc_transients", "Transient suppression", 0.0, 1.0, 0.05, 2,
+             "How much drum-like energy is held out of the vocal. High values also dull consonants."),
+        ]),
+        ("Harmonic / percussive (HPSS): Harmonic / perc., drums, guitars / keys", [
+            ("hpss_time_s", "Sustain length (s)", 0.05, 1.0, 0.05, 2,
+             "Sound that stays steady at least this long counts as harmonic."),
+            ("hpss_freq_hz", "Hit width (Hz)", 100.0, 3000.0, 50.0, 0,
+             "Sound spread across at least this much spectrum at once counts as percussive."),
+            ("hpss_margin", "Split margin", 1.0, 5.0, 0.25, 2,
+             "1 splits everything into two stems. Above 1 only clear cases go to Harmonic or\n"
+             "Percussive and the rest becomes a third Residual stem."),
+            ("drum_margin", "Drum margin", 1.0, 6.0, 0.25, 2,
+             "Margin for the DSP drum estimate. Higher keeps only clear hits."),
+            ("bass_cutoff", "Bass top (Hz)", 60.0, 500.0, 10.0, 0,
+             "Upper edge of the DSP bass estimate, and the lower edge of guitars / keys."),
+        ]),
+    ]
+
+    def __init__(self, parent, settings):
+        from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox
+
+        from ..dsp.dsp_separate import DSPSettings
+
+        super().__init__(parent)
+        self._cls = DSPSettings
+        self.setWindowTitle("DSP separation settings")
+        self.setMinimumWidth(480)
+        lay = QVBoxLayout(self)
+        note = QLabel("These control the model-free methods. Changing a value makes the next run recompute; "
+                      "earlier results stay cached for their own settings.")
+        note.setWordWrap(True)
+        note.setObjectName("hint")
+        lay.addWidget(note)
+        self.widgets = {}
+        for title, items in self.GROUPS:
+            g = QGroupBox(title)
+            gl = QGridLayout(g)
+            for row, (name, label, lo, hi, step, dec, tip) in enumerate(items):
+                lbl = QLabel(label)
+                lbl.setToolTip(tip)
+                if dec == 0 and isinstance(getattr(settings, name), int):
+                    w = QSpinBox()
+                    w.setRange(int(lo), int(hi))
+                    w.setSingleStep(int(step))
+                else:
+                    w = QDoubleSpinBox()
+                    w.setRange(lo, hi)
+                    w.setSingleStep(step)
+                    w.setDecimals(dec)
+                w.setValue(getattr(settings, name))
+                w.setToolTip(tip)
+                gl.addWidget(lbl, row, 0)
+                gl.addWidget(w, row, 1)
+                self.widgets[name] = w
+            lay.addWidget(g)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.RestoreDefaults)
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        bb.button(QDialogButtonBox.RestoreDefaults).clicked.connect(self._defaults)
+        lay.addWidget(bb)
+
+    def _defaults(self):
+        d = self._cls()
+        for name, w in self.widgets.items():
+            w.setValue(getattr(d, name))
+
+    def result_settings(self):
+        s = self._cls()
+        for name, w in self.widgets.items():
+            setattr(s, name, type(getattr(s, name))(w.value()))
+        return s

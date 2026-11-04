@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# AppImage entry point. The AppImage runtime mounts the image and sets
+# APPDIR; this hands off to the PyInstaller build inside it.
+set -euo pipefail
+
+appdir="${APPDIR:-}"
+if [ -z "$appdir" ]; then
+    # Run straight from an extracted AppDir (squashfs-root/AppRun).
+    appdir="$(cd -- "$(dirname -- "$0")" && pwd)" || exit 1
+fi
+
+exe="$appdir/usr/lib/splitscope/SplitScope"
+if [ ! -x "$exe" ]; then
+    printf 'SplitScope: %s is missing or not executable\n' "$exe" >&2
+    exit 1
+fi
+
+exec "$exe" "$@"

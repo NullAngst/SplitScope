@@ -1,11 +1,13 @@
 """One-click isolation recipes.
 
 Each recipe returns a list of (stem name, audio) plus the name that should
-be soloed. Results of expensive steps are cached per source so, for example,
-"Lead vocal" after "Isolate vocals" does not rerun the vocal model.
+be soloed. Results of expensive steps are cached per source, per model and
+per DSP settings, so "Lead vocal" after "Isolate vocals" does not rerun the
+vocal step, but changing a DSP setting or the preferred model does.
 
-AI models are used when installed; otherwise the recipe falls back to DSP
-and says so in the returned note.
+AI models are used when installed, unless DSP-only mode is on. Without a
+model every recipe has a model-free path (see dsp/dsp_separate.py), and the
+returned notes say which one ran.
 """
 from __future__ import annotations
 
@@ -22,18 +24,27 @@ Progress = Callable[[float, str], None]
 
 TARGETS = [
     # key, button label, tooltip
-    ("vocals", "Isolate vocals", "AI vocal model. Produces Vocals + Instrumental and solos Vocals."),
-    ("instrumental", "Remove vocals", "AI vocal model. Solos the Instrumental (karaoke track)."),
+    ("vocals", "Isolate vocals", "AI vocal model, or the DSP vocal estimate (repetition + center + band + "
+                                 "transient cues). Produces Vocals + Instrumental and solos Vocals."),
+    ("instrumental", "Remove vocals", "Same split as Isolate vocals. Solos the Instrumental (karaoke track)."),
     ("lead_vocal", "Lead vocal", "Vocals, then the Karaoke model (or center extraction) to keep the lead."),
     ("backing_vocals", "Backing vocals", "Vocals, then Karaoke model (or side extraction). Backing vocals are usually panned wide."),
-    ("drums", "Isolate drums", "AI drum model, or harmonic/percussive split without it."),
-    ("bass", "Isolate bass", "AI bass model, or low-passed harmonic content without it."),
-    ("other", "Guitars / keys", "AI 'other' model: guitars, keys, synths. Without it: instrumental minus drums and bass."),
+    ("drums", "Isolate drums", "AI drum model, or a percussive split with a margin (clear hits only) without it."),
+    ("bass", "Isolate bass", "AI bass model, or sustained low center content from a long-window split."),
+    ("other", "Guitars / keys", "AI 'other' model: guitars, keys, synths. Without it: sustained, non-vocal content above the bass."),
     ("center", "Center channel", "Spectral center extraction (lead vocal, kick, snare, bass usually live here)."),
     ("sides", "Side channels", "Everything that is not center: wide guitars, backing vocals, reverb."),
+    ("repeating", "Repeating / lead", "REPET-SIM, no model. Whatever repeats through the song (loops, riffs, "
+                                      "backing) goes to Repeating; what does not (lead vocal, solos, fills) goes to Lead."),
+    ("multistage", "Sustain / voice / hits", "Two-pass median filtering, no model. A long window pulls out steady "
+                                             "instruments, a short one splits the rest into voice/leads and drums."),
     ("mid_side", "Mid / side split", "Plain matrix split: Mid = (L+R)/2, Side = (L-R)/2."),
-    ("harm_perc", "Harmonic / perc.", "Median-filter split of sustained vs transient sound."),
+    ("harm_perc", "Harmonic / perc.", "Median-filter split of sustained vs transient sound. Set an HPSS margin "
+                                      "above 1 in DSP settings for a third Residual stem."),
 ]
+
+# Recipes that never use a model; they ignore DSP-only mode.
+DSP_TARGETS = {"center", "sides", "repeating", "multistage", "mid_side", "harm_perc"}
 
 
 @dataclass
@@ -47,6 +58,8 @@ class Separator:
     def __init__(self):
         self.cache: dict[tuple, dict[str, np.ndarray]] = {}
         self.denoise = False
+        self.dsp_only = False
+        self.dsp = D.DSPSettings()
         self.preferred: dict[str, str] = {}
 
     def clear(self, source_id=None):
@@ -58,7 +71,22 @@ class Separator:
 
     # --------------------------------------------------------- building blocks
     def _model(self, role: str) -> Optional[M.ModelInfo]:
+        if self.dsp_only:
+            return None
         return M.first_installed(role, self.preferred.get(role))
+
+    def _mkey(self, m: Optional[M.ModelInfo]) -> tuple:
+        """Cache tag: which model (and quality) or which DSP settings made a result."""
+        if m is None:
+            return ("dsp",) + self.dsp.key()
+        return (m.key, self.denoise)
+
+    def _missing(self, notes, what: str, model: str):
+        if self.dsp_only:
+            notes.append(f"DSP-only mode: {what}.")
+        else:
+            notes.append(f"No {model} model installed: {what}. Install one in Models for real separation, "
+                         "or turn on DSP-only mode to hide this note.")
 
     def _run_model(self, m: M.ModelInfo, audio, sr, progress, cancelled, label):
         path = M.find_model_file(m.file)
@@ -66,26 +94,22 @@ class Separator:
         return separate_file_audio(audio, sr, str(path), m.params, denoise=self.denoise,
                                    progress=cb, cancelled=cancelled)
 
+    @staticmethod
+    def _p(progress, label):
+        return (lambda f: progress(f, label)) if progress else None
+
     def vocals(self, sid, audio, sr, progress, cancelled, notes):
-        key = (sid, "vocals")
+        m = self._model("vocals")
+        key = (sid, "vocals") + self._mkey(m)
+        if m is None:
+            self._missing(notes, "vocals estimated from repetition, stereo position, vocal band and transients. "
+                                 "Tune it in Separate > DSP separation settings", "vocal")
         if key in self.cache:
             return self.cache[key]
-        m = self._model("vocals")
         if m is None:
-            notes.append("No vocal model installed: used center extraction + vocal-range focus instead. "
-                         "Install Kim Vocal 2 in Models for real separation.")
-            center, _ = D.center_sides(audio, sr, progress=(lambda f: progress(f, "Center extraction")) if progress else None,
-                                       cancelled=cancelled)
-            from .dsp.chain import ChainSettings, compile_params
-            from .dsp.processor import ArraySource, render_offline
-            s = ChainSettings()
-            s.eq_enabled = False
-            s.output.limiter = False
-            s.focus.enabled = True
-            s.focus.ranges[0].lo, s.focus.ranges[0].hi = 120.0, 9000.0
-            voc = render_offline(ArraySource(center), compile_params(s, sr), sr)
-            res = {"Vocals (DSP estimate)": voc, "Instrumental (DSP estimate)": (audio - voc).astype(np.float32)}
-            res["_voc"], res["_inst"] = "Vocals (DSP estimate)", "Instrumental (DSP estimate)"
+            voc, inst = D.vocals_estimate(audio, sr, self.dsp, self._p(progress, "DSP vocal estimate"), cancelled)
+            res = {"Vocals (DSP)": voc, "Instrumental (DSP)": inst,
+                   "_voc": "Vocals (DSP)", "_inst": "Instrumental (DSP)"}
         else:
             primary, secondary = self._run_model(m, audio, sr, progress, cancelled, f"{m.title}")
             if m.params.primary_stem.lower().startswith("instrument"):
@@ -96,18 +120,21 @@ class Separator:
         self.cache[key] = res
         return res
 
+    def instrumental(self, sid, audio, sr, progress, cancelled, notes):
+        v = self.vocals(sid, audio, sr, progress, cancelled, notes)
+        return v[v["_inst"]]
+
     def lead_backing(self, sid, audio, sr, progress, cancelled, notes):
-        key = (sid, "lead_backing")
-        if key in self.cache:
-            return self.cache[key]
         v = self.vocals(sid, audio, sr, progress, cancelled, notes)
         voc = v[v["_voc"]]
         m = self._model("karaoke")
+        key = (sid, "lead_backing") + self._mkey(self._model("vocals")) + self._mkey(m)
         if m is None:
-            notes.append("No karaoke model installed: split lead/backing by stereo position "
-                         "(center = lead, sides = backing).")
-            lead, back = D.center_sides(voc, sr, strict=0.7,
-                                        progress=(lambda f: progress(f, "Center extraction")) if progress else None,
+            self._missing(notes, "lead/backing split by stereo position (center = lead, sides = backing)", "karaoke")
+        if key in self.cache:
+            return self.cache[key]
+        if m is None:
+            lead, back = D.center_sides(voc, sr, strict=0.7, progress=self._p(progress, "Center extraction"),
                                         cancelled=cancelled)
         else:
             back, lead = self._run_model(m, voc, sr, progress, cancelled, m.title)
@@ -116,32 +143,29 @@ class Separator:
         return res
 
     def ai_stem(self, role, sid, audio, sr, progress, cancelled):
-        key = (sid, role)
-        if key in self.cache:
-            return self.cache[key]
         m = self._model(role)
         if m is None:
             return None
+        key = (sid, role) + self._mkey(m)
+        if key in self.cache:
+            return self.cache[key]
         primary, secondary = self._run_model(m, audio, sr, progress, cancelled, m.title)
         res = {m.params.primary_stem: primary, "_name": m.params.primary_stem}
         self.cache[key] = res
         return res
 
-    def hpss(self, sid, audio, sr, progress, cancelled):
-        key = (sid, "hpss")
-        if key in self.cache:
-            return self.cache[key]
-        h, p = D.hpss(audio, sr, progress=(lambda f: progress(f, "Harmonic/percussive split")) if progress else None,
-                      cancelled=cancelled)
-        res = {"Harmonic": h, "Percussive": p}
-        self.cache[key] = res
-        return res
+    def _cached(self, key, fn):
+        key = key + self._mkey(None)
+        if key not in self.cache:
+            self.cache[key] = fn()
+        return self.cache[key]
 
     # --------------------------------------------------------- recipes
     def run(self, target: str, sid, audio: np.ndarray, sr: int,
             progress: Optional[Progress] = None, cancelled=None) -> RecipeResult:
         notes: list[str] = []
         prog = progress or (lambda f, s: None)
+        s = self.dsp
 
         if target in ("vocals", "instrumental"):
             v = self.vocals(sid, audio, sr, prog, cancelled, notes)
@@ -157,52 +181,75 @@ class Separator:
             r = self.ai_stem("drums", sid, audio, sr, prog, cancelled)
             if r is not None:
                 return RecipeResult([(r["_name"], r[r["_name"]])], r["_name"], notes)
-            notes.append("No drum model installed: used harmonic/percussive separation. "
-                         "Transients from other instruments will be included.")
-            base = audio
-            if self._model("vocals") is not None:
-                base = self.vocals(sid, audio, sr, prog, cancelled, notes)["Instrumental"]
-            h, p = D.hpss(base, sr, margin=2.0, progress=lambda f: prog(f, "Harmonic/percussive split"),
-                          cancelled=cancelled)
-            return RecipeResult([("Drums (percussive estimate)", p)], "Drums (percussive estimate)", notes)
+            self._missing(notes, "drums are the clearly percussive part of the mix. Hard picking, strums "
+                                 "and consonants land there too", "drum")
+            d = self._cached((sid, "drums_dsp"), lambda: D.drums_estimate(
+                audio, sr, s, self._p(prog, "Percussive split"), cancelled))
+            return RecipeResult([("Drums (DSP)", d), ("Without drums (DSP)", (audio - d).astype(np.float32))],
+                                "Drums (DSP)", notes)
 
         if target == "bass":
             r = self.ai_stem("bass", sid, audio, sr, prog, cancelled)
             if r is not None:
                 return RecipeResult([(r["_name"], r[r["_name"]])], r["_name"], notes)
-            notes.append("No bass model installed: used low-passed harmonic content (kick drum body may bleed in).")
-            hp = self.hpss(sid, audio, sr, prog, cancelled)
-            low, _ = D.split_low(hp["Harmonic"], sr, 220.0)
-            return RecipeResult([("Bass (low-pass estimate)", low)], "Bass (low-pass estimate)", notes)
+            self._missing(notes, f"bass is sustained, mostly-center content below {s.bass_cutoff:.0f} Hz. "
+                                 "Kick drum tails and low keys can bleed in", "bass")
+            b = self._cached((sid, "bass_dsp"), lambda: D.bass_estimate(
+                audio, sr, s, self._p(prog, "Bass estimate"), cancelled))
+            return RecipeResult([("Bass (DSP)", b), ("Without bass (DSP)", (audio - b).astype(np.float32))],
+                                "Bass (DSP)", notes)
 
         if target == "other":
             r = self.ai_stem("other", sid, audio, sr, prog, cancelled)
             if r is not None:
                 return RecipeResult([(r["_name"], r[r["_name"]])], r["_name"], notes)
-            notes.append("No 'other' model installed: estimated as harmonic, non-vocal content above the bass range.")
-            base = audio
-            if self._model("vocals") is not None:
-                base = self.vocals(sid, audio, sr, prog, cancelled, notes)["Instrumental"]
-            h, p = D.hpss(base, sr, progress=lambda f: prog(f, "Harmonic/percussive split"), cancelled=cancelled)
-            _, rest = D.split_low(h, sr, 180.0)
-            return RecipeResult([("Other (estimate)", rest)], "Other (estimate)", notes)
+            self._missing(notes, "estimated as sustained content of the instrumental above the bass range", "'other'")
+            inst = self.instrumental(sid, audio, sr, prog, cancelled, notes)
+
+            def make():
+                h, _ = D.hpss(inst, sr, time_s=s.hpss_time_s, freq_hz=s.hpss_freq_hz,
+                              progress=self._p(prog, "Harmonic/percussive split"), cancelled=cancelled)
+                _, rest = D.split_low(h, sr, s.bass_cutoff)
+                return rest
+
+            o = self._cached((sid, "other_dsp") + self._mkey(self._model("vocals")), make)
+            return RecipeResult([("Other (DSP)", o)], "Other (DSP)", notes)
 
         if target in ("center", "sides"):
-            key = (sid, "center_sides")
-            if key not in self.cache:
-                c, s = D.center_sides(audio, sr, progress=lambda f: prog(f, "Center extraction"), cancelled=cancelled)
-                self.cache[key] = {"Center": c, "Sides": s}
-            cs = self.cache[key]
+            cs = self.cache.get((sid, "center_sides"))
+            if cs is None:
+                c, sd = D.center_sides(audio, sr, progress=lambda f: prog(f, "Center extraction"), cancelled=cancelled)
+                cs = self.cache[(sid, "center_sides")] = {"Center": c, "Sides": sd}
             return RecipeResult([("Center", cs["Center"]), ("Sides", cs["Sides"])],
                                 "Center" if target == "center" else "Sides", notes)
 
+        if target == "repeating":
+            fg, bg = self._cached((sid, "repet"), lambda: D.repet_sim(
+                audio, sr, s, self._p(prog, "Finding repetition (REPET-SIM)"), cancelled))
+            return RecipeResult([("Lead (non-repeating)", fg), ("Repeating", bg)], "Lead (non-repeating)", notes)
+
+        if target == "multistage":
+            su, vo, hi = self._cached((sid, "multistage"), lambda: D.multistage(
+                audio, sr, s, self._p(prog, "Two-pass median filtering"), cancelled))
+            return RecipeResult([("Sustained", su), ("Voice / leads", vo), ("Hits", hi)], "Voice / leads", notes)
+
         if target == "mid_side":
-            m, s = D.mid_side(audio)
-            return RecipeResult([("Mid (L+R)", m), ("Side (L-R)", s)], "Mid (L+R)", notes)
+            m, sd = D.mid_side(audio)
+            return RecipeResult([("Mid (L+R)", m), ("Side (L-R)", sd)], "Mid (L+R)", notes)
 
         if target == "harm_perc":
-            hp = self.hpss(sid, audio, sr, prog, cancelled)
-            return RecipeResult([("Harmonic", hp["Harmonic"]), ("Percussive", hp["Percussive"])], "Harmonic", notes)
+            three = s.hpss_margin > 1.0
+
+            def make():
+                return D.hpss(audio, sr, margin=s.hpss_margin, time_s=s.hpss_time_s, freq_hz=s.hpss_freq_hz,
+                              three_way=three, progress=self._p(prog, "Harmonic/percussive split"),
+                              cancelled=cancelled)
+
+            parts = self._cached((sid, "hpss"), make)
+            stems = [("Harmonic", parts[0]), ("Percussive", parts[1])]
+            if len(parts) > 2:
+                stems.append(("Residual", parts[2]))
+            return RecipeResult(stems, "Harmonic", notes)
 
         raise ValueError(f"Unknown target {target}")
 

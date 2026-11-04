@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=SplitScope
+GenericName=Audio separation workstation
+Comment=Separate vocals, drums, bass and more, with real-time EQ and analyser
+Exec=SplitScope %f
+Icon=splitscope
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=stems;separation;vocals;karaoke;eq;spectrum;
+MimeType=audio/mpeg;audio/flac;audio/x-flac;audio/x-wav;audio/wav;audio/ogg;audio/x-vorbis+ogg;audio/opus;audio/mp4;audio/aac;audio/x-aiff;
+StartupWMClass=SplitScope

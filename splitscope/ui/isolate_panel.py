@@ -15,6 +15,8 @@ AI_TARGETS = {"vocals": "vocals", "instrumental": "vocals", "lead_vocal": "karao
 class IsolatePanel(QWidget):
     isolateRequested = Signal(str)       # target key
     modelsRequested = Signal()
+    dspSettingsRequested = Signal()
+    dspOnlyChanged = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -53,6 +55,18 @@ class IsolatePanel(QWidget):
                                 "Removes some model noise. Doubles processing time.")
         lay.addWidget(self.denoise)
 
+        drow = QHBoxLayout()
+        self.dsp_only = QCheckBox("DSP only (no AI)")
+        self.dsp_only.setToolTip("Every button uses its model-free method, even when models are installed.\n"
+                                 "Use it to compare, or to work entirely without AI.")
+        self.dsp_only.toggled.connect(self._dsp_toggled)
+        drow.addWidget(self.dsp_only, 1)
+        ds = QPushButton("DSP settings")
+        ds.setToolTip("Tune the model-free methods: repetition, center weighting, vocal band, HPSS")
+        ds.clicked.connect(self.dspSettingsRequested)
+        drow.addWidget(ds)
+        lay.addLayout(drow)
+
         mrow = QHBoxLayout()
         self.status = QLabel()
         self.status.setObjectName("hint")
@@ -65,8 +79,13 @@ class IsolatePanel(QWidget):
         lay.addLayout(mrow)
         self.refresh_models()
 
+    def _dsp_toggled(self, on: bool):
+        self.dspOnlyChanged.emit(on)
+        self.refresh_models()
+
     def refresh_models(self):
-        have = {r: M.first_installed(r) is not None for r in M.ROLES}
+        dsp_only = self.dsp_only.isChecked() if hasattr(self, "dsp_only") else False
+        have = {r: (not dsp_only) and M.first_installed(r) is not None for r in M.ROLES}
         missing = [r for r in M.ROLES if not have[r]]
         for key, btn in self.buttons.items():
             role = AI_TARGETS.get(key)
@@ -75,15 +94,20 @@ class IsolatePanel(QWidget):
             btn.setText(base)
             btn.setProperty("dsp", "true" if dsp else "false")
             tip = next(t for k, _, t in TARGETS if k == key)
-            btn.setToolTip(tip + ("\n\nNo model installed for this: uses the DSP fallback (lower quality)."
-                                  if dsp else ""))
+            if dsp and dsp_only:
+                tip += "\n\nDSP-only mode: uses the model-free method."
+            elif dsp:
+                tip += "\n\nNo model installed for this: uses the model-free method (lower quality than a model)."
+            btn.setToolTip(tip)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
-        if not missing:
+        if dsp_only:
+            self.status.setText("DSP-only mode: no models are used. Dashed buttons run their model-free method.")
+        elif not missing:
             self.status.setText("All AI models installed.")
         elif len(missing) == len(M.ROLES):
-            self.status.setText("No AI models installed. Dashed buttons use DSP fallbacks "
-                                "(much lower quality). Open Models to download.")
+            self.status.setText("No AI models installed. Dashed buttons use model-free methods "
+                                "(lower quality than models). Open Models to download.")
         else:
             self.status.setText("Missing models: " + ", ".join(missing) + ". Dashed buttons fall back to DSP.")
 
@@ -104,3 +128,4 @@ class IsolatePanel(QWidget):
         for b in self.buttons.values():
             b.setEnabled(not busy)
         self.source.setEnabled(not busy)
+        self.dsp_only.setEnabled(not busy)

@@ -20,10 +20,11 @@ from ..dsp.chain import ChainSettings, compile_params
 from ..dsp.mdx import Cancelled
 from ..dsp.processor import ArraySource, render_offline
 from ..engine import AudioEngine, SD_ERROR, list_output_devices, sd
+from ..dsp.dsp_separate import DSPSettings
 from ..separation import Separator, TARGETS
 from . import theme as T
 from .chain_panels import ChainPanel
-from .dialogs import ExportDialog, ModelDialog
+from .dialogs import DSPSettingsDialog, ExportDialog, ModelDialog
 from .isolate_panel import IsolatePanel
 from .jobs import Job
 from .spectrogram_view import SpectrogramView
@@ -237,6 +238,8 @@ class MainWindow(QMainWindow):
         self.isolate.isolateRequested.connect(self.isolate_target)
         self.isolate.modelsRequested.connect(self.models_dialog)
         self.isolate.denoise.toggled.connect(lambda v: setattr(self.sep, "denoise", v))
+        self.isolate.dspOnlyChanged.connect(lambda v: setattr(self.sep, "dsp_only", v))
+        self.isolate.dspSettingsRequested.connect(self.dsp_settings_dialog)
         self.stems.mixChanged.connect(self._mix_changed)
         self.stems.stemAction.connect(self._stem_action)
         self.stems.selectionChanged.connect(self._stem_selected)
@@ -281,6 +284,8 @@ class MainWindow(QMainWindow):
         self.run_menu.aboutToShow.connect(self._fill_run_menu)
         sm.addAction("Render processing chain to new stem", self.render_chain_to_stem)
         sm.addSeparator()
+        sm.addAction("DSP separation settings...", self.dsp_settings_dialog)
+        sm.addSeparator()
         sm.addAction("Clear separation cache", self._clear_cache)
         sm.setToolTipsVisible(True)
 
@@ -324,6 +329,11 @@ class MainWindow(QMainWindow):
                 sp.restoreState(st)
         self.vol.setValue(int(self.qs.value("volume", 80)))
         self.isolate.denoise.setChecked(self.qs.value("denoise", "false") in ("true", True))
+        self.isolate.dsp_only.setChecked(self.qs.value("dsp_only", "false") in ("true", True))
+        try:
+            self.sep.dsp = DSPSettings.from_dict(json.loads(self.qs.value("dsp_settings", "{}") or "{}"))
+        except (TypeError, ValueError):
+            self.sep.dsp = DSPSettings()
         for a, key in ((self.a_pre, "show_pre"), (self.a_peak, "show_peak"), (self.a_guide, "show_guide"),
                        (self.a_sgram, "show_sgram")):
             v = self.qs.value(key)
@@ -343,6 +353,8 @@ class MainWindow(QMainWindow):
         self.qs.setValue("center_split", self.center_split.saveState())
         self.qs.setValue("volume", self.vol.value())
         self.qs.setValue("denoise", self.isolate.denoise.isChecked())
+        self.qs.setValue("dsp_only", self.isolate.dsp_only.isChecked())
+        self.qs.setValue("dsp_settings", json.dumps(self.sep.dsp.to_dict()))
         self.qs.setValue("preferred_models", json.dumps(self.sep.preferred))
         self.qs.setValue("show_pre", self.a_pre.isChecked())
         self.qs.setValue("show_peak", self.a_peak.isChecked())
@@ -509,6 +521,9 @@ class MainWindow(QMainWindow):
             if existing is None:
                 existing = self.engine.add_stem(full, audio)
                 self.derived[key] = existing.id
+            elif existing.audio is not audio:
+                # Same stem name from a rerun with other settings or another model: replace it.
+                existing.audio = audio
             if name == res.solo:
                 solo_stem = existing
         if solo_stem is not None:
@@ -547,6 +562,13 @@ class MainWindow(QMainWindow):
             a = self.run_menu.addAction(f"{m.title}  ({m.params.primary_stem} / {m.secondary})",
                                         lambda mm=m: self._run_specific(mm))
             a.setEnabled(self.job is None and bool(self.engine.stems))
+
+    def dsp_settings_dialog(self):
+        dlg = DSPSettingsDialog(self, self.sep.dsp)
+        if dlg.exec():
+            self.sep.dsp = dlg.result_settings()
+            self.qs.setValue("dsp_settings", json.dumps(self.sep.dsp.to_dict()))
+            self.status.showMessage("DSP settings saved. The next model-free run uses them.", 6000)
 
     def models_dialog(self):
         dlg = ModelDialog(self, self.sep.preferred)
@@ -946,8 +968,10 @@ class MainWindow(QMainWindow):
 GUIDE = """Open a file (Ctrl+O or drag it onto the window).
 
 Isolate: the buttons on the left create new stems and solo the result. Vocals, drums, bass and \
-guitars/keys use AI models when installed (Models button); otherwise they fall back to DSP and are \
-marked (DSP). Center channel / Side channels work on stereo position and need no model.
+guitars/keys use AI models when installed (Models button); otherwise, or with "DSP only" ticked, they \
+use model-free methods and their stems are marked (DSP). Center / Side channels, Repeating / lead, \
+Sustain / voice / hits, Mid / side and Harmonic / perc. never need a model. Tune the model-free \
+methods with the DSP settings button.
 
 Stems: M mutes, S solos (Ctrl+click S to solo only that stem). The ... menu exports a stem or makes \
 it the source for further separation, for example Isolate vocals, then Backing vocals.

@@ -2,6 +2,7 @@
 
 Models are looked up in (first match wins):
   1. <exe dir>/models         portable folder next to the executable
+                              (next to the .AppImage file on Linux)
   2. bundled models           packed into the release by the GitHub build
   3. <user data dir>/models   where in-app downloads go
 
@@ -84,6 +85,11 @@ def user_models_dir() -> Path:
 
 
 def _exe_dir() -> Path:
+    # AppImage: the image is read-only, so the portable folder sits next to
+    # the .AppImage file itself. The AppImage runtime sets $APPIMAGE.
+    appimage = os.environ.get("APPIMAGE")
+    if appimage and os.path.isfile(appimage):
+        return Path(appimage).resolve().parent
     if getattr(sys, "frozen", False):
         exe = Path(sys.executable).resolve().parent
         # macOS: SplitScope.app/Contents/MacOS -> folder containing the .app
